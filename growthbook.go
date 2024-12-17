@@ -375,8 +375,6 @@ func (gb *GrowthBook) Feature(key string) *FeatureResult {
 // EvalFeature returns the result for a feature identified by a string
 // feature key.
 func (gb *GrowthBook) EvalFeature(id string) *FeatureResult {
-	gb.inner.RLock()
-	defer gb.inner.RUnlock()
 
 	// Global override.
 	if gb.inner.forcedFeatureValues != nil {
