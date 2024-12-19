@@ -33,12 +33,13 @@ type growthBookData struct {
 	context             *Context
 	forcedFeatureValues map[string]interface{}
 	attributeOverrides  Attributes
-	trackedFeatures     sync.Map
-	trackedExperiments  sync.Map
+	trackedFeatures     map[string]interface{}
+	trackedExperiments  map[string]bool
 	nextSubscriptionID  subscriptionID
 	subscriptions       map[subscriptionID]ExperimentCallback
-	assigned            sync.Map
+	assigned            map[string]*Assignment
 	ready               bool
+	finalAttributes     Attributes
 }
 
 // New creates a new GrowthBook instance.
@@ -96,11 +97,12 @@ func New(context *Context) *GrowthBook {
 		context:             context,
 		forcedFeatureValues: nil,
 		attributeOverrides:  nil,
-		trackedFeatures:     sync.Map{},
-		trackedExperiments:  sync.Map{},
+		trackedFeatures:     make(map[string]interface{}),
+		trackedExperiments:  make(map[string]bool),
 		nextSubscriptionID:  1,
 		subscriptions:       make(map[subscriptionID]ExperimentCallback),
-		assigned:            sync.Map{},
+		assigned:            make(map[string]*Assignment),
+		finalAttributes:     nil,
 	}
 	gb := &GrowthBook{inner}
 	runtime.SetFinalizer(gb, func(gb *GrowthBook) { repoUnsubscribe(gb) })
@@ -366,6 +368,16 @@ func (gb *GrowthBook) GetFeatureValue(key string, defaultValue interface{}) inte
 	return defaultValue
 }
 
+// WithURL sets the URL in a GrowthBook's context.
+func (gb *GrowthBook) SetFinalAttributes() *GrowthBook {
+
+	attributes := gb.Attributes()
+	gb.inner.Lock()
+	gb.inner.finalAttributes = attributes
+	defer gb.inner.Unlock()
+	return gb
+}
+
 // Deprecated: Use EvalFeature instead. Feature returns the result for
 // a feature identified by a string feature key.
 func (gb *GrowthBook) Feature(key string) *FeatureResult {
@@ -375,6 +387,8 @@ func (gb *GrowthBook) Feature(key string) *FeatureResult {
 // EvalFeature returns the result for a feature identified by a string
 // feature key.
 func (gb *GrowthBook) EvalFeature(id string) *FeatureResult {
+	gb.inner.RLock()
+	defer gb.inner.RUnlock()
 
 	// Global override.
 	if gb.inner.forcedFeatureValues != nil {
@@ -395,7 +409,7 @@ func (gb *GrowthBook) EvalFeature(id string) *FeatureResult {
 	for _, rule := range feature.Rules {
 		// If the rule has a condition and the condition does not pass,
 		// skip this rule.
-		if rule.Condition != nil && !rule.Condition.Eval(gb.Attributes()) {
+		if rule.Condition != nil && !rule.Condition.Eval(gb.inner.finalAttributes) {
 			logInfo("Skip rule because of condition", id, rule)
 			continue
 		}
@@ -482,7 +496,7 @@ func (gb *GrowthBook) Subscribe(callback ExperimentCallback) func() {
 
 // GetAllResults returns a map containing all the latest results from
 // all experiments that have been run, indexed by the experiment key.
-func (gb *GrowthBook) GetAllResults() sync.Map {
+func (gb *GrowthBook) GetAllResults() map[string]*Assignment {
 	gb.inner.RLock()
 	defer gb.inner.RUnlock()
 
@@ -496,7 +510,7 @@ func (gb *GrowthBook) ClearSavedResults() {
 	gb.inner.Lock()
 	defer gb.inner.Unlock()
 
-	gb.inner.assigned = sync.Map{}
+	gb.inner.assigned = make(map[string]*Assignment)
 }
 
 // ClearTrackingData clears out records of calls to the experiment
@@ -505,7 +519,7 @@ func (gb *GrowthBook) ClearTrackingData() {
 	gb.inner.Lock()
 	defer gb.inner.Unlock()
 
-	gb.inner.trackedExperiments = sync.Map{}
+	gb.inner.trackedExperiments = make(map[string]bool)
 }
 
 // GetAPIInfo gets the hostname and client key for GrowthBook API
@@ -569,10 +583,10 @@ func (gb *GrowthBook) trackFeatureUsage(key string, res *FeatureResult) {
 	}
 
 	// Only track a feature once, unless the assigned value changed.
-	if saved, ok := gb.inner.trackedFeatures.Load(key); ok && reflect.DeepEqual(saved, res.Value) {
+	if saved, ok := gb.inner.trackedFeatures[key]; ok && reflect.DeepEqual(saved, res.Value) {
 		return
 	}
-	gb.inner.trackedFeatures.Store(key, res.Value)
+	gb.inner.trackedFeatures[key] = res.Value
 
 	// Fire user-supplied callback
 	if gb.inner.context.OnFeatureUsage != nil {
@@ -662,17 +676,17 @@ func (gb *GrowthBook) fireSubscriptions(exp *Experiment, result *Result) {
 	// Determine whether the result changed from the last stored result
 	// for the experiment.
 	changed := false
-	storedResult, exists := gb.inner.assigned.Load(exp.Key)
+	storedResult, exists := gb.inner.assigned[exp.Key]
 	if exists {
-		storedResultAssignment := storedResult.(*Assignment)
-		if storedResultAssignment.Result.InExperiment != result.InExperiment ||
-			storedResultAssignment.Result.VariationID != result.VariationID {
+		if storedResult.Result.InExperiment != result.InExperiment ||
+			storedResult.Result.VariationID != result.VariationID {
 			changed = true
 		}
 	}
 
 	// Store the experiment result.
-	gb.inner.assigned.Store(exp.Key, &Assignment{exp, result})
+	gb.inner.assigned[exp.Key] = &Assignment{exp, result}
+
 	// If the result changed, trigger all subscriptions.
 	if changed || !exists {
 		for _, sub := range gb.inner.subscriptions {
@@ -855,11 +869,11 @@ func (gb *GrowthBook) track(exp *Experiment, result *Result) {
 	// experiment.
 	key := result.HashAttribute + result.HashValue +
 		exp.Key + strconv.Itoa(result.VariationID)
-	if _, exists := gb.inner.trackedExperiments.Load(key); exists {
+	if _, exists := gb.inner.trackedExperiments[key]; exists {
 		return
 	}
 
-	gb.inner.trackedExperiments.Store(key, true)
+	gb.inner.trackedExperiments[key] = true
 	gb.inner.context.TrackingCallback(exp, result)
 }
 
