@@ -39,7 +39,6 @@ type growthBookData struct {
 	subscriptions       map[subscriptionID]ExperimentCallback
 	assigned            map[string]*Assignment
 	ready               bool
-	finalAttributes     Attributes
 }
 
 // New creates a new GrowthBook instance.
@@ -102,7 +101,6 @@ func New(context *Context) *GrowthBook {
 		nextSubscriptionID:  1,
 		subscriptions:       make(map[subscriptionID]ExperimentCallback),
 		assigned:            make(map[string]*Assignment),
-		finalAttributes:     nil,
 	}
 	gb := &GrowthBook{inner}
 	runtime.SetFinalizer(gb, func(gb *GrowthBook) { repoUnsubscribe(gb) })
@@ -368,16 +366,6 @@ func (gb *GrowthBook) GetFeatureValue(key string, defaultValue interface{}) inte
 	return defaultValue
 }
 
-// WithURL sets the URL in a GrowthBook's context.
-func (gb *GrowthBook) SetFinalAttributes() *GrowthBook {
-
-	attributes := gb.Attributes()
-	gb.inner.Lock()
-	gb.inner.finalAttributes = attributes
-	defer gb.inner.Unlock()
-	return gb
-}
-
 // Deprecated: Use EvalFeature instead. Feature returns the result for
 // a feature identified by a string feature key.
 func (gb *GrowthBook) Feature(key string) *FeatureResult {
@@ -409,7 +397,7 @@ func (gb *GrowthBook) EvalFeature(id string) *FeatureResult {
 	for _, rule := range feature.Rules {
 		// If the rule has a condition and the condition does not pass,
 		// skip this rule.
-		if rule.Condition != nil && !rule.Condition.Eval(gb.inner.finalAttributes) {
+		if rule.Condition != nil && !rule.Condition.Eval(gb.inner.context.Attributes) {
 			logInfo("Skip rule because of condition", id, rule)
 			continue
 		}
